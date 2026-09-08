@@ -1,13 +1,13 @@
 {
-  "id": "dev.bdg.example-basic",
+  "id": "dev.bdg.phira-converter",
   "version": "0.1.0",
   "name": {
-    "zh": "示例插件（基础）",
-    "en": "Example Plugin (basic)"
+    "zh": "Phira 谱面转换器",
+    "en": "Phira Chart Converter"
   },
   "description": {
-    "zh": "验证插件宿主加载/启停的最小示例，同时提供 renderer 与 main 两个入口。",
-    "en": "Minimal sample verifying the plugin host load/unload with both a renderer and a main entry."
+    "zh": "把工程中的踩点(Tap)转换成 Phira/RPE 谱面，可选合并成单判定线模式，并连同音频打包为 .pez。",
+    "en": "Convert project tap markers into a Phira/RPE chart, with optional single-judge-line merge mode, and pack it with the audio into a .pez."
   },
   "main": "main.js",
   "renderer": "renderer.js"

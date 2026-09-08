@@ -211,6 +211,8 @@ interface PluginApi {
       path: string,
     ) => Promise<{ canceled: boolean; filePath?: string; content?: string }>;
     writeText: (path: string, content: string) => Promise<boolean>;
+    /** Absolute path to the current project's audio file, or null if none. */
+    audioPath: () => string | null;
     openWindow: (opts: {
       url: string;
       title?: string;

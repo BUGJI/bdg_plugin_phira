@@ -1,109 +1,61 @@
-# Beat Data Generator 插件系统
+# bdg_plugin_phira — Phira 谱面转换器
 
-插件用于扩展踩点编辑器:导入/导出新格式、数据生成与批量编辑、侧栏浮动静默面板、
-自定义快捷键、独立预览窗口,以及针对特定游戏新增“类型化轨道”(如翻转事件),
-它们与内置踩点共用同一条节拍时间轴。
+把 Beat Data Generator（贝踏编辑器）工程中的踩点(Tap)转换成 **Phira / RPE 谱面**，
+并将谱面、音频、曲绘一起打包为 `.pez`（zip）文件，供 Phira 导入播放。
 
-## 插件形态
+## 功能
 
-插件是一个文件夹,内含:
+- 每个踩点 marker → 一个 **Tap**(`type:1`) 音符，落在判定线中线上。
+- 支持**合并模式**：把所有轨道合并成一条判定线（单轨）；关闭时每条编辑器轨道 = 一条判定线。
+- 判定线随流速 `speed=10` 滚动；音符从判定线上方落入(`above:1`)。
+- 非合并模式下多条判定线在 X∈[-600,600] 均匀铺开（`moveXEvents`），音符坐标保持 `positionX:0`、`yOffset:-10`。
+- META 元信息（曲名/难度/谱师/编曲/曲绘作者）面板手动填写，曲名用工程信息自动填充。
+- 谱面名做**文件名基底**：空格→`-`、剔除非法字符；包内 `<基底>.json`、`<基底>.<音频扩展>`、`<基底>.<图扩展>` 与谱面名一致。
+- 打包附带 `info.txt`（`#` + `Key: Value`，`load_info` 可读）、音频（`api.system.audioPath()` 取工程音频）、曲绘（用户外部选择）。
+
+## 安装
+
+把整个 `bdg_plugin_phira` 文件夹放入宿主扫描目录：
+
+- 用户目录 `<userData>/plugins/`
+- 开发模式下工程根目录的 `plugins/`
+
+## 使用
+
+1. 打开插件面板（菜单「Phira 谱面转换设置」或快捷键 `Alt+P`）。
+2. 勾选「合并成单轨（一条判定线）」决定是否合并。
+3. 填 META 元信息；点「选择曲绘图片…」选外部配图。
+4. 点「生成并导出 .pez」或在「导出」菜单选「Phira 谱面：导出 .pez」。
+5. 面板底部日志会显示打包每一步的结果。
+
+## 生成结构
 
 ```
-my-plugin/
-├─ manifest.json    # 元信息(必需)
-├─ main.js          # 可选:主进程入口(全 Node + Electron 权限)
-├─ renderer.js      # 可选:编辑器页面内执行的脚本(注册 UI 贡献)
-└─ …                # 插件自带的 HTML/静态资源
+<基底>.pez
+├─ <基底>.json      # RPE chart（META / BPMList / judgeLineList）
+├─ info.txt          # # + Name/Song/Chart/Image/…
+├─ <基底>.<音频扩展>  # 工程音频
+└─ <基底>.<图扩展>    # 曲绘（可选）
 ```
 
-扫描目录:
+`<基部> = sanitize(谱面名)`（空格→`-`，剔除 `\ / : * ? " < > |`）。
 
-- 用户目录 `<userData>/plugins`(设置页可一键打开);
-- 开发模式下同时扫描项目根目录的 `plugins/`(示例插件放这里)。
-- manifest 解析失败的插件会列在设置中并显示错误,不影响其余插件。
+## 文件说明
 
-### manifest.json
+| 文件            | 作用 |
+|----------------|------|
+| `manifest.json` | 元信息，声明 renderer 与 main 入口 |
+| `renderer.js`   | UI 侧：面板、动作、快捷键、导出器；构建谱面 JSON 与 info.txt |
+| `main.js`      | 主进程侧：`package` 处理器，用 Node 读音频/曲绘并把各文件打包成合法 zip（自定义 ZIP 写入器 + `zlib.deflateRaw`) |
+| `plugin-api.d.ts` | 宿主类型提示（含补充的 `system.audioPath()`） |
 
-```json
-{
-  "id": "dev.bdg.example-basic",
-  "version": "0.1.0",
-  "name": { "zh": "示例插件", "en": "Example Plugin" },
-  "description": { "zh": "…", "en": "…" },
-  "main": "main.js",
-  "renderer": "renderer.js"
-}
-```
+## 与宿主机制的对接
 
-`name`/`description` 可为字符串或 `{ zh, en }`。`id` 建议反向域名风格且**不得含冒号 `:`**。
+- 导出通过 `api.ui.registerExporter` + `api.system.saveFile`。
+- 谱面 JSON 由 `renderer.js` 构造并 `JSON.stringify`，经 `api.callMain("package", {...})` 交给 `main.js` 打包落盘（沙箱无法写二进制 zip）。
+- 生成的 `META` 同时带 `offset`/`RPEVersion`（供 `parse_rpe` 读谱）与 `name/level/charter/composer/song/illustration`（供 `fix_info` 导入时填元数据，`fs.rs`）。
+- 判定线 `Texture:"line.png"` → Phira 使用内置判定线（`JudgeLineKind::Normal`），不依赖包内纹理文件。
 
-## renderer.js(UI 侧)
+## 许可
 
-`renderer.js` 是普通脚本,通过全局注册函数声明入口。类型提示:
-
-```js
-/// <reference path="plugin-api.d.ts" />
-window.__bdgPluginRegister(function activate(api) {
-  // 在此注册所有贡献(见 PluginApi 类型)
-  return function dispose() {
-    // 卸载清理(取消订阅等)
-  };
-});
-```
-
-可以注册的贡献:
-
-- `api.ui.registerAction({ label, run })` → 出现在顶部「插件」菜单;
-- `api.ui.registerPanel({ id, title, mount })` → 浮动静默窗口(可拖动、右下角可缩放),`mount(hostEl)` 里用 DOM 自由渲染,返回可选清理函数;返回 `PanelHandle` 可 `open()/toggle()` 等;
-- `api.ui.registerShortcut({ id, label, combo, run })` → `combo` 形如 `Alt+1`、`Ctrl+Shift+F`;
-- `api.ui.registerImporter({ label, run })` → 出现在「文件 → 导入…」;
-- `api.ui.registerExporter({ label, run })` → 出现在「导出」菜单的“插件导出”分组;
-- `api.trackTypes.register({ id, trackName, pointName, color?, fields })` → 新增类型化轨道,侧栏 `＋` 可创建,点在属性卡里编辑字段。
-
-## main.js(主进程侧)
-
-在主进程加载,拥有完整 Node / Electron:
-
-```js
-module.exports = function activate(ctx) {
-  ctx.log("loaded", ctx.dir);
-  ctx.registerHandler("ping", () => "pong");
-  ctx.onDispose(() => {});
-};
-```
-
-渲染进程用 `api.callMain(method, ...args)` 调本插件注册的处理器。`activate` 需保持同步。
-
-## 数据与工程文件
-
-- 快照:`api.project.snapshot()` 一次给出节拍视角与 `timeMs` 时间视角(见字段)。
-- 编辑一律走 `api.project.edit.*`,自动计入撤销栈;多步编辑用 `edit.batch(fn)` 合并为一次撤销。
-- 类型化轨道:轨道带 `type: "<pluginId>:<localId>"`;点带 `attrs`,字段默认值在放置/粘贴时自动补齐,或由插件用 `setMarkerAttrs` 修改。
-- 内置导出(.txt / EDL / 踩点指示灯)**不**包含类型化轨道;插件导出自行读取。
-- `.bdg` 直接存 `type` + `attrs`,字段全可选、向后兼容。若保存的工程含某插件类型而该插件未安装:轨道与数据照常显示(点属性只读),属性卡提示需要安装对应插件。
-
-## 渲染↔系统能力
-
-编辑器渲染层是沙箱(`sandbox:true` + `contextIsolation`)。插件拿到的是受限桥接:
-
-- 数据/编辑/播放/选区/事件、`api.system.pickFile/saveFile/readText/writeText`、`openWindow(加载任意页面)`、`callMain`;
-- 需要任意 Node 能力时让插件自带 `main.js` 处理。本系统**不弹权限确认**,安装插件即视为信任。
-
-## 示例
-
-`plugins/example-basic` 覆盖:面板、动作、快捷键、导入/导出、main 往返调用、类型化轨道注册。
-开发时把工程目录当扫描根即可(见上),发布则把插件放入 `<userData>/plugins`。
-
-## 常用命令
-
-```bash
-npm run typecheck   # 改动编辑器代码后跑类型检查
-npm run build
-```
-
-## 许可与发布
-
-- 你编写的插件属于你自己的作品(版权归你),可自行选择开源协议。
-- 宿主编辑器 **Beat Data Generator** 以 **GNU GPL v3** 发布(作者 BUGJI)。插件由宿主加载器装载运行,分发插件时建议注明与宿主的关联。
-- 插件命名格式建议为 bdg_plugin_xxxxxx ，便于搜索
-- 官方插件模板/脚手架见 <https://github.com/BUGJI/bdg_plugin_template>。
+本插件为独立作品，版权归作者所有。宿主插件加载器与 Phira 以各自许可证发布。

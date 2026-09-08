@@ -1,46 +1,27 @@
+/// <reference path="plugin-api.d.ts" />
 window.__bdgPluginRegister(function activate(api) {
-  api.log("renderer entry activated (id=" + api.id + ")");
+  var mergeMode = true;
 
-  var tr = api.trackTypes.register({
-    id: "flip",
-    trackName: { zh: "翻转轨", en: "Flip track" },
-    pointName: { zh: "翻转点", en: "Flip" },
-    color: "#e11d48",
-    fields: [
-      {
-        key: "direction",
-        label: { zh: "方向", en: "Direction" },
-        type: "enum",
-        default: "up",
-        options: [
-          { value: "up", label: { zh: "上", en: "Up" } },
-          { value: "down", label: { zh: "下", en: "Down" } },
-        ],
-      },
-      {
-        key: "power",
-        label: { zh: "力度", en: "Power" },
-        type: "number",
-        default: 1,
-        min: 0,
-        max: 10,
-        step: 0.5,
-      },
-      {
-        key: "hold",
-        label: { zh: "长按", en: "Hold" },
-        type: "bool",
-        default: false,
-      },
-    ],
-  });
-  api.log("track type register:", tr);
+  var nameInput = null;
+  var levelInput = null;
+  var charterInput = null;
+  var composerInput = null;
+  var illustratorInput = null;
+  var illustrationPath = "";
+  var illPathLabel = null;
+  var logEl = null;
 
-  var stopEvents = [];
+  function log(msg) {
+    api.log(msg);
+    if (logEl) {
+      logEl.textContent = msg + "\n" + logEl.textContent;
+    }
+  }
 
-  function clearStopEvents() {
-    for (var i = 0; i < stopEvents.length; i++) stopEvents[i]();
-    stopEvents.length = 0;
+  function logError(err) {
+    var text = err;
+    if (err && err.message) text = err.message;
+    log("error: " + text);
   }
 
   function el(tag, cls, text) {
@@ -50,203 +31,329 @@ window.__bdgPluginRegister(function activate(api) {
     return n;
   }
 
+  function inputField(host, labelText, value) {
+    var block = el("div", "phira-field");
+    var lab = el("div", "phira-field-label", labelText);
+    var inp = document.createElement("input");
+    inp.type = "text";
+    if (value) inp.value = value;
+    block.appendChild(lab);
+    block.appendChild(inp);
+    host.appendChild(block);
+    return inp;
+  }
+
+  // 把 beat 浮点数转成 RPE 的 Triple 数组 [整数, 分子, 分母]（i + n/d）
+  function beatToTriple(beat, maxDen) {
+    var whole = Math.floor(beat + 1e-9);
+    var frac = beat - whole;
+    if (frac < 0) { whole -= 1; frac += 1; }
+    var best = { n: 0, d: 1, err: Math.abs(frac) };
+    for (var d = 1; d <= maxDen; d++) {
+      var n = Math.round(frac * d);
+      var err = Math.abs(frac - n / d);
+      if (err < best.err) { best = { n: n, d: d, err: err }; }
+      if (err < 1e-9) break;
+    }
+    if (best.n === best.d) { whole += 1; best = { n: 0, d: 1, err: 0 }; }
+    return [whole, best.n, best.d];
+  }
+
+  function noteFromMarker(m) {
+    return {
+      type: 1,
+      above: 1, // 音符从判定线上方落入（之前的 below 方向是反的）
+      startTime: beatToTriple(m.beat, 192),
+      endTime: [0, 0, 1],
+      positionX: 0, // 音符坐标不分散，保持判定线中线
+      yOffset: -10,
+      alpha: 255,
+      size: 1,
+      speed: 1,
+      isFake: 0,
+      visibleTime: 1e9,
+    };
+  }
+
+  // 判定线：滚动流速设为 10（speedEvents start=end=10），并按 xPos 分散判定线 X 位置
+  function judgeLine(name, notes, maxBeat, xPos) {
+    var end = beatToTriple(Math.max(maxBeat, 1), 192);
+    return {
+      Name: name,
+      Texture: "line.png",
+      father: -1,
+      rotateWithFather: false,
+      eventLayers: [
+        {
+          speedEvents: [
+            { easingType: 1, startTime: [0, 0, 1], endTime: end, start: 10, end: 10 },
+          ],
+          moveXEvents: [
+            { easingType: 1, startTime: [0, 0, 1], endTime: end, start: xPos, end: xPos },
+          ],
+        },
+      ],
+      notes: notes,
+      isCover: 0,
+      zOrder: 0,
+      posControl: [],
+      sizeControl: [],
+      alphaControl: [],
+      yControl: [],
+    };
+  }
+
+  // 第 i 条判定线（共 n 条）的 X 位置，在 [-600, 600] 均匀铺开
+  function trackX(n, i) {
+    if (n < 2) return 0;
+    return (i / (n - 1) * 2 - 1) * 600;
+  }
+
+  function maxMarkerBeat(ms) {
+    var mx = 0;
+    for (var i = 0; i < ms.length; i++) if (ms[i].beat > mx) mx = ms[i].beat;
+    return mx;
+  }
+
+  function val(inp) { return inp ? inp.value.trim() : ""; }
+
+  // 谱面名做基底：空格->-、剔除非法文件名字符，作为所有文件名统一前缀
+  function sanitizeName(name) {
+    return (String(name || "")
+      .replace(/\s+/g, "-")
+      .replace(/[\\/:*?"<>|]/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-+|-+$/g, "")) || "chart";
+  }
+  function chartBase(s) { return sanitizeName(val(nameInput) || s.name); }
+
+  function extOf(p) {
+    var n = baseName(p);
+    var i = n.lastIndexOf(".");
+    return i >= 0 ? n.slice(i).toLowerCase() : "";
+  }
+
+  function buildChart(s, audioPath) {
+    var bpm = s.baseBpm || 120;
+    var offset = Math.round(s.offsetMs || 0);
+    var base = chartBase(s);
+    var audioName = base + extOf(audioPath);
+    var illName = base + extOf(illustrationPath);
+
+    var byTime = function (a, b) { return a.beat - b.beat; };
+    var judgeLines = [];
+
+    if (mergeMode) {
+      var notes = s.markers.slice().sort(byTime).map(noteFromMarker);
+      judgeLines.push(judgeLine("Line", notes, maxMarkerBeat(s.markers), 0));
+    } else {
+      for (var i = 0; i < s.tracks.length; i++) {
+        var track = s.tracks[i];
+        var tm = s.markers.filter(function (m) { return m.trackId === track.id; });
+        var tn = tm.slice().sort(byTime).map(noteFromMarker);
+        judgeLines.push(judgeLine(track.name || "Line " + (i + 1), tn, maxMarkerBeat(tm), trackX(s.tracks.length, i)));
+      }
+    }
+
+    var meta = {
+      offset: offset,
+      RPEVersion: 160,
+      name: base,
+      level: val(levelInput),
+      charter: val(charterInput),
+      composer: val(composerInput),
+      song: audioName,
+      illustration: illName,
+      background: illName,
+    };
+
+    return {
+      META: meta,
+      BPMList: [{ bpm: bpm, startTime: [0, 0, 1] }],
+      judgeLineList: judgeLines,
+    };
+  }
+
+  function buildInfoTxt(s, audioPath) {
+    var base = chartBase(s);
+    var lines = ["#", "Name: " + base];
+    if (extOf(audioPath)) lines.push("Song: " + base + extOf(audioPath));
+    lines.push("Chart: " + base + ".json");
+    if (extOf(illustrationPath)) lines.push("Image: " + base + extOf(illustrationPath));
+    if (val(levelInput)) lines.push("Level: " + val(levelInput));
+    if (val(composerInput)) lines.push("Artist: " + val(composerInput));
+    if (val(charterInput)) lines.push("Charter: " + val(charterInput));
+    if (val(illustratorInput)) lines.push("Illustrator: " + val(illustratorInput));
+    return lines.join("\n");
+  }
+
+  function baseName(p) {
+    if (!p) return "";
+    var parts = p.split(/[\\/]/);
+    return parts[parts.length - 1] || "";
+  }
+
+  function exportChart() {
+    var s = api.project.snapshot();
+    if (!s.markers.length) {
+      log("没有踩点(Tap)，无可导出内容");
+      return;
+    }
+    log("开始导出 .pez  (踩点 x" + s.markers.length + ", 合并=" + mergeMode + ")");
+
+    var audioPath = api.system.audioPath ? (api.system.audioPath() || "") : "";
+    if (!audioPath) log("warning: 未取到工程音频路径(audioPath)，.pez 将不含音频");
+    else log("音频路径: " + audioPath);
+
+    if (illustrationPath) log("曲绘: " + illustrationPath);
+    else log("warning: 未选择曲绘，.pez 将不含配图");
+
+    var base = chartBase(s);
+    var audioName = base + extOf(audioPath);
+    var illName = base + extOf(illustrationPath);
+    var chartName = base + ".json";
+    log("文件名基底: " + base);
+
+    var chart = buildChart(s, audioPath);
+    var infoTxt = buildInfoTxt(s, audioPath);
+
+    api.system
+      .saveFile({
+        title: "导出 Phira 谱面 (.pez)",
+        defaultPath: base + ".pez",
+        filters: [{ name: "Phira PEZ", extensions: ["pez"] }],
+      })
+      .then(function (res) {
+        if (res.canceled || !res.filePath) {
+          log("已取消导出");
+          return;
+        }
+        log("已选保存路径: " + res.filePath + ", 调 main 打包...");
+        return api.callMain("package", {
+          outPath: res.filePath,
+          json: JSON.stringify(chart, null, 2),
+          infoTxt: infoTxt,
+          audioPath: audioPath,
+          audioName: audioName,
+          illustrationPath: illustrationPath,
+          illustrationName: illName,
+          chartName: chartName,
+        });
+      })
+      .then(function (result) {
+        if (result === undefined) return; // canceled
+        if (result && result.ok) {
+          log("导出成功: " + (result.entries || []).join(", "));
+        } else {
+          log("导出失败: main 返回 " + JSON.stringify(result));
+        }
+      })
+      .catch(logError);
+  }
+
   var panel = api.ui.registerPanel({
-    id: "demo",
-    title: { zh: "示例面板", en: "Demo Panel" },
+    id: "phira-convert",
+    title: { zh: "Phira 谱面转换设置", en: "Phira Converter Settings" },
     mount: function mount(host) {
       host.textContent = "";
 
-      var wrap = el("div", "demo-wrap");
+      var s = api.project.snapshot();
+
+      var wrap = el("div", "phira-wrap");
       host.appendChild(wrap);
 
-      var head = el("div", "demo-head");
-      head.textContent = api.id + " v" + api.version;
-      wrap.appendChild(head);
+      var tip = el("div", "phira-tip");
+      tip.textContent = "放置 Tap 踩点后导出：每个踩点 = 一个 Tap 音符。";
+      wrap.appendChild(tip);
 
-      var stats = el("div", "demo-row");
-      wrap.appendChild(stats);
-
-      var log = el("pre", "demo-log");
-      wrap.appendChild(log);
-
-      function renderStats() {
-        var s = api.project.snapshot();
-        var pos = api.player.positionMs();
-        stats.textContent =
-          "tracks=" + s.tracks.length +
-          " markers=" + s.markers.length +
-          " bpm=" + s.baseBpm.toFixed(1) +
-          " t=" + pos.toFixed(0) + "ms";
-      }
-
-      function logText(msg) {
-        log.textContent = msg + "\n" + log.textContent;
-      }
-
-      stopEvents.push(api.events.on("project", renderStats));
-      stopEvents.push(api.events.on("playhead", renderStats));
-
-      var btnAdd = el("button", "demo-btn", "add marker @ playhead");
-      btnAdd.addEventListener("click", function () {
-        var beat = api.project.beatOfTime(api.player.positionMs());
-        var s = api.project.snapshot();
-        var trackId = s.tracks.length ? s.tracks[0].id : "";
-        if (!trackId) return;
-        var id = api.project.edit.addMarker({ trackId: trackId, beat: beat });
-        logText("added marker " + id);
+      var row = el("label", "phira-row");
+      var chk = el("input");
+      chk.type = "checkbox";
+      chk.checked = mergeMode;
+      chk.addEventListener("change", function () {
+        mergeMode = chk.checked;
+        syncHint();
       });
-      wrap.appendChild(btnAdd);
+      row.appendChild(chk);
+      row.appendChild(document.createTextNode("合并成单轨（一条判定线，Tap 居中 X=0）"));
+      wrap.appendChild(row);
 
-      var btnPing = el("button", "demo-btn", "ping main.js");
-      btnPing.addEventListener("click", function () {
-        api.callMain("ping", 1, 2)
-          .then(function (res) {
-            logText("main says: " + res);
-          })
-          .catch(function (err) {
-            logText("main error: " + err);
-          });
-      });
-      wrap.appendChild(btnPing);
+      var hint = el("div", "phira-hint");
+      hint.id = "phira-hint";
+      wrap.appendChild(hint);
 
-      var btnExport = el("button", "demo-btn", "export tracks to txt");
-      btnExport.addEventListener("click", function () {
-        var s = api.project.snapshot();
-        var lines = s.markers.map(function (m) {
-          return m.timeMs.toFixed(3) + " (beat " + m.beat + ")";
-        });
+      var sep1 = el("div", "phira-sep", "META 元信息");
+      wrap.appendChild(sep1);
+
+      nameInput = inputField(wrap, "曲名", s.name || "");
+      levelInput = inputField(wrap, "难度", "");
+      charterInput = inputField(wrap, "谱师", "");
+      composerInput = inputField(wrap, "编曲", "");
+      illustratorInput = inputField(wrap, "曲绘作者", "");
+
+      var sep2 = el("div", "phira-sep", "曲绘（配图）");
+      wrap.appendChild(sep2);
+
+      var illRow = el("div", "phira-row");
+      var btnIll = el("button", "phira-btn", "选择曲绘图片…");
+      btnIll.addEventListener("click", function () {
         api.system
-          .saveFile({
-            title: "Save sample export",
-            defaultPath: "tracks.txt",
-            filters: [{ name: "Text", extensions: ["txt"] }],
+          .pickFile({
+            title: "选择曲绘图片",
+            filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "bmp", "gif", "webp"] }],
           })
-          .then(function (res) {
-            if (res.canceled || !res.filePath) return;
-            return api.system.writeText(res.filePath, lines.join("\n"));
+          .then(function (p) {
+            if (!p) return;
+            illustrationPath = p;
+            if (illPathLabel) illPathLabel.textContent = illustrationPath;
+            log("已选曲绘: " + illustrationPath);
           })
-          .then(function (ok) {
-            logText(ok ? "saved" : "write failed");
-          });
+          .catch(logError);
       });
+      illRow.appendChild(btnIll);
+      illPathLabel = el("span", "phira-path", illustrationPath);
+      illRow.appendChild(illPathLabel);
+      wrap.appendChild(illRow);
+
+      var btnExport = el("button", "phira-btn", "生成并导出 .pez");
+      btnExport.addEventListener("click", exportChart);
       wrap.appendChild(btnExport);
 
-      renderStats();
-      logText("panel mounted");
-      return function unmount() {
-        clearStopEvents();
-        host.textContent = "";
-      };
+      logEl = el("pre", "phira-log");
+      logEl.textContent = "";
+      wrap.appendChild(logEl);
+
+      function syncHint() {
+        hint.textContent = mergeMode
+          ? "当前：所有轨道合并为一条判定线"
+          : "当前：每条轨道对应一条判定线（Tap 仍居中）";
+      }
+      syncHint();
+
+      return function unmount() { host.textContent = ""; logEl = null; };
     },
   });
 
   api.ui.registerAction({
-    label: { zh: "切换示例面板", en: "Toggle demo panel" },
-    run: function () {
-      panel.toggle();
-    },
+    label: { zh: "Phira 谱面转换设置", en: "Phira Converter Settings" },
+    run: function () { panel.open(); },
   });
 
   api.ui.registerShortcut({
-    id: "toggle-demo",
-    label: { zh: "切换示例面板", en: "Toggle demo panel" },
-    combo: "Alt+1",
-    run: function () {
-      panel.toggle();
-    },
+    id: "toggle-phira-convert",
+    label: { zh: "切换 Phira 转换面板", en: "Toggle Phira converter panel" },
+    combo: "Alt+P",
+    run: function () { panel.toggle(); },
   });
-
-  var flipKey = api.id + ":flip";
 
   api.ui.registerExporter({
-    label: { zh: "示例:翻转点 CSV", en: "Sample: flip points CSV" },
-    run: function () {
-      var s = api.project.snapshot();
-      var lines = ["beat,timeMs,direction,power,hold"];
-      for (var i = 0; i < s.markers.length; i++) {
-        var m = s.markers[i];
-        var track = null;
-        for (var j = 0; j < s.tracks.length; j++) {
-          if (s.tracks[j].id === m.trackId) track = s.tracks[j];
-        }
-        if (!track || track.type !== flipKey || !m.attrs) continue;
-        lines.push(
-          m.beat +
-            "," +
-            m.timeMs.toFixed(3) +
-            "," +
-            m.attrs.direction +
-            "," +
-            (m.attrs.power !== undefined ? m.attrs.power : "") +
-            "," +
-            (m.attrs.hold ? 1 : 0),
-        );
-      }
-      if (lines.length === 1) {
-        api.log("exporter: no flip points to export");
-        return;
-      }
-      api.system
-        .saveFile({
-          title: "Export flip CSV",
-          defaultPath: "flip.csv",
-          filters: [{ name: "CSV", extensions: ["csv"] }],
-        })
-        .then(function (res) {
-          if (res.canceled || !res.filePath) return;
-          return api.system.writeText(res.filePath, lines.join("\n"));
-        })
-        .then(function (ok) {
-          api.log("exporter:", ok ? "saved" : "write failed");
-        });
-    },
+    label: { zh: "Phira 谱面：导出 .pez", en: "Phira chart: Export .pez" },
+    run: exportChart,
   });
 
-  api.ui.registerImporter({
-    label: { zh: "示例:导入翻转 CSV", en: "Sample: import flip CSV" },
-    run: function () {
-      api.system
-        .pickFile({
-          title: "Open flip CSV",
-          filters: [
-            { name: "CSV", extensions: ["csv", "txt"] },
-            { name: "All files", extensions: ["*"] },
-          ],
-        })
-        .then(function (path) {
-          if (!path) return;
-          return api.system.readText(path);
-        })
-        .then(function (res) {
-          if (!res || res.canceled || res.content === undefined) return;
-          var rows = res.content.split(/\r?\n/);
-          var trackId = null;
-          api.project.edit.batch(function () {
-            trackId = api.project.edit.addTypedTrack(flipKey);
-            for (var i = 0; i < rows.length; i++) {
-              var line = rows[i].trim();
-              if (!line || line.charAt(0) === "#") continue;
-              if (line.indexOf("beat") === 0) continue;
-              var cols = line.split(",");
-              var beat = parseFloat(cols[0]);
-              if (!isFinite(beat) || beat < 0) continue;
-              if (trackId) {
-                api.project.edit.addMarker({
-                  trackId: trackId,
-                  beat: beat,
-                });
-              }
-            }
-          });
-          api.log("importer: done, track =", trackId);
-        });
-    },
-  });
-
-  api.log("contributions registered");
+  api.log("Phira converter contributions registered, mergeMode=" + mergeMode);
 
   return function dispose() {
-    clearStopEvents();
-    api.log("renderer entry disposed");
+    api.log("Phira converter disposed");
   };
 });
