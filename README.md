@@ -1,6 +1,8 @@
+> 目前产物存在大部分编辑器打不开的问题，非常需要开发者的 PR
+
 # bdg_plugin_phira — Phira 谱面转换器
 
-把 Beat Data Generator（贝踏编辑器）工程中的踩点(Tap)转换成 **Phira / RPE 谱面**，
+把 Beat Data Generator 工程中的踩点(Tap)转换成 **Phira / RPE 谱面**，
 并将谱面、音频、曲绘一起打包为 `.pez`（zip）文件，供 Phira 导入播放。
 
 ## 功能
